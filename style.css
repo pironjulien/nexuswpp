@@ -252,8 +252,10 @@ body {
 .dashboard {
     width: 92vw;
     max-width: 2700px;
-    height: calc(100vh - 180px) !important;
-    margin-bottom: 85px !important;
+    /* Preserve the same optical safe area at every DPI. On a 4K TV Windows can
+       expose a short CSS viewport, so fixed 180/85 px offsets used to crop cards. */
+    height: calc(100vh - clamp(112px, 16.6vh, 180px)) !important;
+    margin-bottom: clamp(56px, 7.9vh, 96px) !important;
     padding: 0 !important;
     display: flex;
     flex-direction: column;
@@ -971,8 +973,8 @@ body.system-critical .nebula {
 
 @media (max-height: 1200px) {
     .dashboard {
-        height: calc(100vh - 180px) !important;
-        margin-bottom: 85px !important;
+        height: calc(100vh - clamp(112px, 16.6vh, 180px)) !important;
+        margin-bottom: clamp(56px, 7.9vh, 96px) !important;
         padding: 0 !important;
     }
     
@@ -1114,5 +1116,149 @@ body.system-critical .nebula {
     .remote-grid.horizontal .remote-btn .icon-wrap svg {
         width: 18px !important;
         height: 18px !important;
+    }
+}
+
+/* TVs frequently run 4K output with 250-300% Windows scaling, which produces a
+   1280x720-ish CSS viewport. Keep every metric inside the visible 16:9 frame
+   instead of letting fixed-size gauges overflow their flex cards. */
+@media (max-height: 900px) and (min-width: 1001px) {
+    .dashboard {
+        width: 92vw !important;
+    }
+
+    .workspace {
+        gap: 10px !important;
+    }
+
+    .column-left,
+    .column-right {
+        gap: 6px !important;
+    }
+
+    .accelerator-row {
+        gap: 6px !important;
+    }
+
+    .gauge-card,
+    .accelerator-card {
+        min-height: 0;
+        padding: 5px 10px !important;
+    }
+
+    .gauge-label,
+    .accelerator-card .gauge-label {
+        flex: 0 0 auto;
+        min-height: 0;
+        margin: 0 0 2px !important;
+        padding: 0 !important;
+        font-size: 11px !important;
+        line-height: 1.2 !important;
+        letter-spacing: 0.8px !important;
+    }
+
+    .gauge-container,
+    .accelerator-card .gauge-container {
+        flex: 0 0 auto;
+        width: 58px !important;
+        height: 58px !important;
+        margin: 0 !important;
+    }
+
+    .gauge-value,
+    .accelerator-card .gauge-value {
+        font-size: 21px !important;
+    }
+
+    .gauge-value span,
+    .accelerator-card .gauge-value span {
+        font-size: 9px !important;
+    }
+
+    .vram-scanner-eye,
+    .npu-scanner-eye {
+        width: 24px !important;
+        height: 24px !important;
+    }
+
+    .card-sub-metrics,
+    .accelerator-card .card-sub-metrics {
+        flex: 1 1 auto;
+        min-height: 0;
+        width: 100%;
+        gap: 1px !important;
+        margin-top: 2px !important;
+        padding-top: 2px !important;
+    }
+
+    .sub-metric .lbl,
+    .accelerator-card .sub-metric .lbl {
+        font-size: 8px !important;
+        line-height: 1.15 !important;
+        letter-spacing: 0.2px !important;
+    }
+
+    .sub-metric .val,
+    .accelerator-card .sub-metric .val {
+        font-size: 10px !important;
+        line-height: 1.15 !important;
+    }
+
+    .sub-progress-container {
+        height: 3px !important;
+        margin-top: 1px !important;
+    }
+
+    .column-center {
+        gap: 6px !important;
+        padding: 8px 10px !important;
+    }
+
+    .hologram-sub-panel {
+        min-height: 100px;
+    }
+
+    .cyber-clock-card {
+        padding: 4px 8px !important;
+    }
+
+    .clock-time {
+        font-size: 24px !important;
+    }
+
+    .clock-time .ms-tick {
+        width: 28px !important;
+        font-size: 10px !important;
+    }
+
+    .clock-date {
+        margin-top: 0 !important;
+        font-size: 10px !important;
+        letter-spacing: 1px !important;
+    }
+
+    .clock-mb,
+    .clock-battery {
+        margin-top: 0 !important;
+        font-size: 8px !important;
+    }
+
+    .remote-sub-panel,
+    .remote-grid.horizontal {
+        gap: 5px !important;
+    }
+
+    .remote-grid.horizontal .remote-btn {
+        min-height: 34px;
+        padding: 4px 6px !important;
+    }
+
+    .remote-grid.horizontal .remote-btn .btn-lbl {
+        font-size: 8px !important;
+    }
+
+    .remote-grid.horizontal .remote-btn .icon-wrap svg {
+        width: 13px !important;
+        height: 13px !important;
     }
 }

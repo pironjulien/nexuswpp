@@ -19,7 +19,7 @@
 
 - Verifier que `.\compile.ps1` compile `bin\nexuswpp.exe`.
 - Verifier que `.\scripts\build_installer.ps1` cree `dist\NexusWppSetup.exe`.
-- Verifier que `.\scripts\build_msix.ps1` cree le package Store `dist\msix\julienpiron.fr.NexusWpp_1.0.12.0_x64.msix`.
+- Verifier que `.\scripts\build_msix.ps1` cree le package Store `dist\msix\julienpiron.fr.NexusWpp_1.0.13.0_x64.msix`.
 - Ne pas versionner `bin/`, `dist/`, les logs, les fichiers temporaires ou les resultats de benchmark.
 
 ## Habitudes projet

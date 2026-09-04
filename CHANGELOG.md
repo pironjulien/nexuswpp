@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-09-04
+
+- Suppression des appels NVML dans le processus principal et collecte NVIDIA isolee via `nvidia-smi`, afin qu'un plantage du pilote ne puisse plus arreter NexusWpp.
+- Recuperation automatique de WebView2 et protection des acces asynchrones pendant sa fermeture.
+- Adaptation verticale du cockpit aux affichages 4K fortement mis a l'echelle, notamment les televiseurs 16:9, sans couper les cartes du bas.
+- Exclusion du panneau de saisie tactile Windows de la detection plein ecran pour eviter une suspension permanente de la telemetrie.
+- Passage du package Microsoft Store en version `1.0.13.0` et de l'installateur autonome en version `1.0.11`.
+
 ## 2026-07-23
 
 - Passage des mises à jour GitHub Actions de Dependabot à un rythme mensuel,

@@ -14,8 +14,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("NexusWpp Installer")]
 [assembly: AssemblyProduct("NexusWpp")]
 [assembly: AssemblyCompany("JULIENPIRON.FR")]
-[assembly: AssemblyFileVersion("1.0.10.0")]
-[assembly: AssemblyVersion("1.0.10.0")]
+[assembly: AssemblyFileVersion("1.0.11.0")]
+[assembly: AssemblyVersion("1.0.11.0")]
 
 namespace NexusWppInstaller
 {
@@ -26,7 +26,7 @@ namespace NexusWppInstaller
         private const string WebView2BootstrapperUrl = "https://go.microsoft.com/fwlink/p/?LinkId=2124703";
         private const string WebView2ClientGuid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}";
         private const string ProductName = "NexusWpp";
-        internal const string ProductVersion = "1.0.10";
+        internal const string ProductVersion = "1.0.11";
         private const string Publisher = "JULIENPIRON.FR";
         private const string UninstallKeyPath = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NexusWpp";
 

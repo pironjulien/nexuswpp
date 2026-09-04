@@ -489,7 +489,7 @@ namespace DesktopHtmlHost
 
         private void WebView_Disposed(object sender, EventArgs e)
         {
-            if (isClosing || IsDisposed)
+            if (isClosing || IsDisposed || !ReferenceEquals(sender, webView))
             {
                 return;
             }
@@ -749,6 +749,7 @@ namespace DesktopHtmlHost
                 if (isClosing || IsDisposed || webView == null || webView.IsDisposed) return;
 
                 webView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
+                webView.CoreWebView2.ProcessFailed += CoreWebView2_ProcessFailed;
 
                 // Configure virtual host mapping to serve files from local directory without HTTP server
                 string directory = Path.GetDirectoryName(htmlPath);
@@ -870,6 +871,13 @@ namespace DesktopHtmlHost
                 Program.LogDebug("WebView2 Runtime failed to initialize: " + ex.ToString());
                 BeginCleanShutdown();
             }
+        }
+
+        private void CoreWebView2_ProcessFailed(object sender, CoreWebView2ProcessFailedEventArgs e)
+        {
+            string kind = e != null ? e.ProcessFailedKind.ToString() : "unknown failure";
+            Program.LogDebug("WebView2 process failed: " + kind + ".");
+            QueueWebViewRecovery("process failure (" + kind + ")");
         }
 
         private void StartRuntimeServices()
@@ -1136,6 +1144,7 @@ namespace DesktopHtmlHost
                 if (processName == "msedgewebview2" ||
                     processName == "explorer" ||
                     processName == "textinputhost" ||
+                    processName == "tabtip" ||
                     processName == "shellexperiencehost" ||
                     processName == "searchhost" ||
                     processName == "startmenuexperiencehost")
@@ -1239,11 +1248,6 @@ namespace DesktopHtmlHost
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             BeginCleanShutdown();
-            try
-            {
-                Nvml.nvmlShutdown();
-            }
-            catch {}
             base.OnFormClosing(e);
         }
 
@@ -1758,66 +1762,6 @@ namespace DesktopHtmlHost
         public static extern void WlanFreeMemory(IntPtr pMemory);
     }
 
-    public static class Nvml
-    {
-        private const string NvmlDll = "nvml.dll";
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct nvmlUtilization_t
-        {
-            public uint gpu;
-            public uint memory;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        public struct nvmlMemory_t
-        {
-            public ulong total;
-            public ulong free;
-            public ulong used;
-        }
-
-        public enum nvmlTemperatureSensors_t
-        {
-            NVML_TEMPERATURE_GPU = 0
-        }
-
-        public enum nvmlClockType_t
-        {
-            NVML_CLOCK_GRAPHICS = 0,
-            NVML_CLOCK_SM = 1,
-            NVML_CLOCK_MEM = 2,
-            NVML_CLOCK_VIDEO = 3
-        }
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlInit_v2")]
-        public static extern int nvmlInit();
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlDeviceGetHandleByIndex_v2")]
-        public static extern int nvmlDeviceGetHandleByIndex(uint index, out IntPtr device);
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlDeviceGetUtilizationRates")]
-        public static extern int nvmlDeviceGetUtilizationRates(IntPtr device, out nvmlUtilization_t utilization);
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlDeviceGetTemperature")]
-        public static extern int nvmlDeviceGetTemperature(IntPtr device, nvmlTemperatureSensors_t sensorType, out uint temp);
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlDeviceGetClockInfo")]
-        public static extern int nvmlDeviceGetClockInfo(IntPtr device, nvmlClockType_t clockType, out uint clock);
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlDeviceGetName")]
-        public static extern int nvmlDeviceGetName(IntPtr device, byte[] name, uint length);
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlDeviceGetMemoryInfo")]
-        public static extern int nvmlDeviceGetMemoryInfo(IntPtr device, out nvmlMemory_t memory);
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlDeviceGetPowerUsage")]
-        public static extern int nvmlDeviceGetPowerUsage(IntPtr device, out uint milliwatts);
-
-        [DllImport(NvmlDll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "nvmlShutdown")]
-        public static extern int nvmlShutdown();
-    }
-
     public class TelemetryCollector
     {
         // Static / Boot cached specs
@@ -1903,6 +1847,19 @@ namespace DesktopHtmlHost
         private int cachedDgpuUtil = 0;
         private long cachedDgpuMemBytes = 0;
         private int cachedIgpuDecodeUtil = 0;
+
+        // NVIDIA telemetry is queried out of process so a faulty display driver cannot corrupt
+        // the wallpaper host. Windows performance counters remain the fast utilization source.
+        private DateTime lastNvidiaSmiTime = DateTime.MinValue;
+        private DateTime lastNvidiaSmiErrorTime = DateTime.MinValue;
+        private bool cachedNvidiaSmiSuccess = false;
+        private int cachedNvidiaGpuUtil = 0;
+        private int cachedNvidiaGpuTemp = -1;
+        private int cachedNvidiaCoreClock = -1;
+        private int cachedNvidiaMemoryClock = -1;
+        private int cachedNvidiaPowerW = -1;
+        private ulong cachedNvidiaVramTotal = 0;
+        private ulong cachedNvidiaVramUsed = 0;
 
         // Wi-Fi signal cache
         private bool wlanUnavailable = false;
@@ -2215,26 +2172,97 @@ namespace DesktopHtmlHost
 
             ReadDgpuVramTotalFromRegistry();
 
-            // Initialize NVML
+            // Initialize power plans
+            UpdatePowerPlansCache();
+        }
+
+        private bool TryGetNvidiaStats(out int utilization, out int temperature, out int coreClock,
+            out int memoryClock, out int powerWatts, out ulong vramTotal, out ulong vramUsed)
+        {
+            if (lastNvidiaSmiTime == DateTime.MinValue || (DateTime.Now - lastNvidiaSmiTime).TotalSeconds >= 5.0)
+            {
+                lastNvidiaSmiTime = DateTime.Now;
+                cachedNvidiaSmiSuccess = QueryNvidiaSmi();
+            }
+
+            utilization = cachedNvidiaGpuUtil;
+            temperature = cachedNvidiaGpuTemp;
+            coreClock = cachedNvidiaCoreClock;
+            memoryClock = cachedNvidiaMemoryClock;
+            powerWatts = cachedNvidiaPowerW;
+            vramTotal = cachedNvidiaVramTotal;
+            vramUsed = cachedNvidiaVramUsed;
+            return cachedNvidiaSmiSuccess;
+        }
+
+        private bool QueryNvidiaSmi()
+        {
+            string windowsDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            string executable = Path.Combine(windowsDirectory, "System32", "nvidia-smi.exe");
+            if (!File.Exists(executable)) return false;
+
             try
             {
-                int nvmlRes = Nvml.nvmlInit();
-                if (nvmlRes == 0)
+                ProcessStartInfo startInfo = new ProcessStartInfo(executable,
+                    "--query-gpu=utilization.gpu,temperature.gpu,clocks.gr,clocks.mem,power.draw,memory.total,memory.used --format=csv,noheader,nounits")
                 {
-                    Program.LogDebug("NVML initialized successfully!");
-                }
-                else
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using (Process process = Process.Start(startInfo))
                 {
-                    Program.LogDebug("NVML initialization failed: " + nvmlRes);
+                    if (process == null) return false;
+                    if (!process.WaitForExit(1500))
+                    {
+                        try { process.Kill(); } catch {}
+                        throw new TimeoutException("nvidia-smi did not respond within 1500 ms.");
+                    }
+                    string output = process.StandardOutput.ReadLine();
+                    if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output)) return false;
+
+                    string[] values = output.Split(',');
+                    if (values.Length < 7) return false;
+
+                    double parsedPower;
+                    double parsedTotalMiB;
+                    double parsedUsedMiB;
+                    int parsedUtilization;
+                    int parsedTemperature;
+                    int parsedCoreClock;
+                    int parsedMemoryClock;
+                    if (!int.TryParse(values[0].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedUtilization) ||
+                        !int.TryParse(values[1].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedTemperature) ||
+                        !int.TryParse(values[2].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedCoreClock) ||
+                        !int.TryParse(values[3].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedMemoryClock) ||
+                        !double.TryParse(values[4].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out parsedPower) ||
+                        !double.TryParse(values[5].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out parsedTotalMiB) ||
+                        !double.TryParse(values[6].Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out parsedUsedMiB))
+                    {
+                        return false;
+                    }
+
+                    cachedNvidiaGpuUtil = Math.Max(0, Math.Min(100, parsedUtilization));
+                    cachedNvidiaGpuTemp = parsedTemperature;
+                    cachedNvidiaCoreClock = parsedCoreClock;
+                    cachedNvidiaMemoryClock = parsedMemoryClock;
+                    cachedNvidiaPowerW = (int)Math.Round(parsedPower);
+                    cachedNvidiaVramTotal = (ulong)Math.Max(0.0, parsedTotalMiB * 1024.0 * 1024.0);
+                    cachedNvidiaVramUsed = (ulong)Math.Max(0.0, parsedUsedMiB * 1024.0 * 1024.0);
+                    return true;
                 }
             }
             catch (Exception ex)
             {
-                Program.LogDebug("NVML init exception: " + ex.Message);
+                if (lastNvidiaSmiErrorTime == DateTime.MinValue || (DateTime.Now - lastNvidiaSmiErrorTime).TotalMinutes >= 1.0)
+                {
+                    lastNvidiaSmiErrorTime = DateTime.Now;
+                    Program.LogDebug("NVIDIA telemetry process failed safely: " + ex.Message);
+                }
+                return false;
             }
-
-            // Initialize power plans
-            UpdatePowerPlansCache();
         }
 
         private static string MemoryTypeFromSmbios(int smbiosType)
@@ -3151,7 +3179,8 @@ namespace DesktopHtmlHost
                 catch {}
             }
 
-            // nvidia GPU stats via NVML (-1 / 0 when the sensor is not available; the UI swaps in another real metric)
+            // NVIDIA metrics are isolated in nvidia-smi. A driver crash can only terminate the
+            // short-lived helper process, never this wallpaper process.
             int gpuUtil = dgpuUtil;
             int gpuTemp = -1;
             int gpuCoreClock = -1;
@@ -3159,56 +3188,10 @@ namespace DesktopHtmlHost
             int gpuPowerW = -1;
             ulong vramTotal = 0;
             ulong vramUsed = 0;
-            bool nvmlSuccess = false;
+            bool nvidiaStatsSuccess = TryGetNvidiaStats(out gpuUtil, out gpuTemp, out gpuCoreClock,
+                out gpuMemClock, out gpuPowerW, out vramTotal, out vramUsed);
 
-            try
-            {
-                IntPtr dev;
-                if (Nvml.nvmlDeviceGetHandleByIndex(0, out dev) == 0)
-                {
-                    Nvml.nvmlUtilization_t util;
-                    if (Nvml.nvmlDeviceGetUtilizationRates(dev, out util) == 0)
-                    {
-                        gpuUtil = (int)util.gpu;
-                    }
-                    
-                    uint temp;
-                    if (Nvml.nvmlDeviceGetTemperature(dev, Nvml.nvmlTemperatureSensors_t.NVML_TEMPERATURE_GPU, out temp) == 0)
-                    {
-                        gpuTemp = (int)temp;
-                    }
-                    
-                    uint coreClock;
-                    if (Nvml.nvmlDeviceGetClockInfo(dev, Nvml.nvmlClockType_t.NVML_CLOCK_GRAPHICS, out coreClock) == 0)
-                    {
-                        gpuCoreClock = (int)coreClock;
-                    }
-                    
-                    uint memClock;
-                    if (Nvml.nvmlDeviceGetClockInfo(dev, Nvml.nvmlClockType_t.NVML_CLOCK_MEM, out memClock) == 0)
-                    {
-                        gpuMemClock = (int)memClock;
-                    }
-
-                    uint milliwatts;
-                    if (Nvml.nvmlDeviceGetPowerUsage(dev, out milliwatts) == 0)
-                    {
-                        gpuPowerW = (int)Math.Round(milliwatts / 1000.0);
-                    }
-
-                    Nvml.nvmlMemory_t mem;
-                    if (Nvml.nvmlDeviceGetMemoryInfo(dev, out mem) == 0)
-                    {
-                        vramTotal = mem.total;
-                        vramUsed = mem.used;
-                    }
-                    
-                    nvmlSuccess = true;
-                }
-            }
-            catch {}
-
-            if (!nvmlSuccess)
+            if (!nvidiaStatsSuccess)
             {
                 // Real fallback: driver-reported VRAM size and the Windows dedicated-memory counter.
                 vramTotal = (ulong)Math.Max(0, dgpuVramTotalBytes);
@@ -3219,7 +3202,7 @@ namespace DesktopHtmlHost
             UpdateTopProcesses();
 
             bool igpuDetected = !string.IsNullOrEmpty(igpuLuid) || !string.IsNullOrEmpty(IgpuInfo);
-            bool dgpuDetected = nvmlSuccess || !string.IsNullOrEmpty(dgpuLuid) || !string.IsNullOrEmpty(GpuName);
+            bool dgpuDetected = nvidiaStatsSuccess || !string.IsNullOrEmpty(dgpuLuid) || !string.IsNullOrEmpty(GpuName);
 
             int wifiSignal = cachedNetType == "Wi-Fi" ? GetWifiSignal() : -1;
 
