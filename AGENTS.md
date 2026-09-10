@@ -18,8 +18,9 @@
 ## Verification
 
 - Verifier que `.\compile.ps1` compile `bin\nexuswpp.exe`.
+- Verifier le transfert des clics et le cycle de vie du hook avec `.\scripts\test_mouse_hook.ps1` apres une modification de la gestion souris.
 - Verifier que `.\scripts\build_installer.ps1` cree `dist\NexusWppSetup.exe`.
-- Verifier que `.\scripts\build_msix.ps1` cree le package Store `dist\msix\julienpiron.fr.NexusWpp_1.0.13.0_x64.msix`.
+- Verifier que `.\scripts\build_msix.ps1` cree le package Store `dist\msix\julienpiron.fr.NexusWpp_1.0.14.0_x64.msix`.
 - Ne pas versionner `bin/`, `dist/`, les logs, les fichiers temporaires ou les resultats de benchmark.
 
 ## Habitudes projet

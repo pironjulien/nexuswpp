@@ -18,7 +18,7 @@ $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $distDir = Join-Path $projectRoot "dist\msix"
 $packageDir = Join-Path $distDir "package"
 $assetsDir = Join-Path $packageDir "Assets"
-$version = "1.0.13.0"
+$version = "1.0.14.0"
 $identityName = "julienpiron.fr.NexusWpp"
 $msixPath = Join-Path $distDir ($identityName + "_" + $version + "_x64.msix")
 $publisher = "CN=C3E3A6F0-11D2-4EE1-B3F2-34EED4CAE7FA"

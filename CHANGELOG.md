@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-09-10
+
+- Isolation du hook souris dans un thread dedie : les attentes de l'affichage WebView2 et de la detection plein ecran ne bloquent plus les mouvements de souris du bureau.
+- Publication atomique des coordonnees du panneau interactif depuis le thread d'affichage et retrait des acces WinForms, recherches de fenetres et ecritures de journal du callback souris.
+- Conservation des clics du selecteur d'alimentation, avec verification de leur transfert avant de les intercepter.
+- Passage du package MSIX en version `1.0.14.0` et de l'installateur autonome en version `1.0.12`.
+
 ## 2026-09-04
 
 - Suppression des appels NVML dans le processus principal et collecte NVIDIA isolee via `nvidia-smi`, afin qu'un plantage du pilote ne puisse plus arreter NexusWpp.

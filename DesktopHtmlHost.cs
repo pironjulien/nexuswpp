@@ -271,8 +271,30 @@ namespace DesktopHtmlHost
         private static DesktopForm activeInstance;
         private static IntPtr hookId = IntPtr.Zero;
         private static LowLevelMouseProc mouseProc;
+        private static Thread mouseHookThread;
+        private static int mouseHookThreadId;
+        private static int mouseHookStopRequested;
+        private static Exception mouseHookError;
         private static System.Drawing.Rectangle remotePanelBounds = System.Drawing.Rectangle.Empty;
         private static IntPtr renderWindow = IntPtr.Zero;
+        private static MouseRoutingSnapshot mouseRouting;
+        private static readonly uint currentProcessId = (uint)Process.GetCurrentProcess().Id;
+
+        // Published by the UI thread as one immutable snapshot. The mouse thread must
+        // never invoke a WinForms control or wait for WebView2/the display driver.
+        private sealed class MouseRoutingSnapshot
+        {
+            internal readonly System.Drawing.Rectangle ScreenBounds;
+            internal readonly IntPtr HostWindow;
+            internal readonly IntPtr RenderWindow;
+
+            internal MouseRoutingSnapshot(System.Drawing.Rectangle bounds, IntPtr host, IntPtr render)
+            {
+                ScreenBounds = bounds;
+                HostWindow = host;
+                RenderWindow = render;
+            }
+        }
 
         // --- Win32 P/Invoke API Definitions ---
 
@@ -288,6 +310,20 @@ namespace DesktopHtmlHost
 
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetMessage(out NativeMessage message, IntPtr window, uint min, uint max);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PeekMessage(out NativeMessage message, IntPtr window, uint min, uint max, uint remove);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PostThreadMessage(uint threadId, uint message, IntPtr wParam, IntPtr lParam);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto)]
         private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder lpClassName, int nMaxCount);
@@ -345,6 +381,18 @@ namespace DesktopHtmlHost
         {
             public int x;
             public int y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeMessage
+        {
+            public IntPtr hwnd;
+            public uint message;
+            public IntPtr wParam;
+            public IntPtr lParam;
+            public uint time;
+            public POINT point;
+            public uint privateData;
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -601,6 +649,7 @@ namespace DesktopHtmlHost
             this.Top = SystemInformation.VirtualScreen.Top;
             this.Width = SystemInformation.VirtualScreen.Width;
             this.Height = SystemInformation.VirtualScreen.Height;
+            PublishMouseRouting();
         }
 
         private void SystemEvents_DisplaySettingsChanged(object sender, EventArgs e)
@@ -693,11 +742,7 @@ namespace DesktopHtmlHost
             if (searchTimer != null) searchTimer.Stop();
             if (telemetryTimer != null) telemetryTimer.Stop();
             if (fullscreenTimer != null) fullscreenTimer.Stop();
-            if (hookId != IntPtr.Zero)
-            {
-                UnhookWindowsHookEx(hookId);
-                hookId = IntPtr.Zero;
-            }
+            StopMouseHook();
 
             if (webView != null)
             {
@@ -882,11 +927,7 @@ namespace DesktopHtmlHost
 
         private void StartRuntimeServices()
         {
-            if (hookId == IntPtr.Zero)
-            {
-                mouseProc = HookCallback;
-                hookId = SetHook(mouseProc);
-            }
+            StartMouseHook();
 
             if (telemetryTimer == null)
             {
@@ -940,6 +981,7 @@ namespace DesktopHtmlHost
             Program.LogDebug("Recovering WebView2 after " + reason + ".");
             telemetryCollectPending = false;
             renderWindow = IntPtr.Zero;
+            Volatile.Write(ref mouseRouting, null);
 
             if (telemetryTimer != null) telemetryTimer.Stop();
 
@@ -993,6 +1035,10 @@ namespace DesktopHtmlHost
         {
             try
             {
+                Exception hookError = Interlocked.Exchange(ref mouseHookError, null);
+                if (hookError != null) Program.LogDebug("Mouse hook error: " + hookError);
+                if (renderWindow == IntPtr.Zero || !IsWindow(renderWindow)) FindRenderWindow();
+                else PublishMouseRouting();
                 string reason;
                 bool fullscreen = IsAnyFullscreenWindow(out reason);
                 fullscreenReason = reason;
@@ -1259,11 +1305,7 @@ namespace DesktopHtmlHost
                 SystemEvents.PowerModeChanged -= SystemEvents_PowerModeChanged;
                 SystemEvents.SessionSwitch -= SystemEvents_SessionSwitch;
                 SystemEvents.SessionEnding -= SystemEvents_SessionEnding;
-                if (hookId != IntPtr.Zero)
-                {
-                    UnhookWindowsHookEx(hookId);
-                    hookId = IntPtr.Zero;
-                }
+                StopMouseHook();
                 if (searchTimer != null)
                 {
                     searchTimer.Dispose();
@@ -1518,82 +1560,99 @@ namespace DesktopHtmlHost
             }
         }
 
-        private static IntPtr SetHook(LowLevelMouseProc proc)
+        private static void StartMouseHook()
+        {
+            if (mouseHookThread != null && mouseHookThread.IsAlive) return;
+            Volatile.Write(ref mouseHookStopRequested, 0);
+            mouseProc = HookCallback;
+            mouseHookThread = new Thread(RunMouseHook);
+            mouseHookThread.IsBackground = true;
+            mouseHookThread.Name = "NexusWpp mouse input";
+            mouseHookThread.Start();
+        }
+
+        private static void RunMouseHook()
         {
             try
             {
-                using (Process curProcess = Process.GetCurrentProcess())
-                using (ProcessModule curModule = curProcess.MainModule)
+                // Create the queue before publishing the ID, so shutdown can always
+                // wake GetMessage, including a shutdown racing with startup.
+                NativeMessage message;
+                PeekMessage(out message, IntPtr.Zero, 0, 0, 0);
+                Volatile.Write(ref mouseHookThreadId, unchecked((int)GetCurrentThreadId()));
+                if (Volatile.Read(ref mouseHookStopRequested) != 0) return;
+
+                hookId = SetWindowsHookEx(WH_MOUSE_LL, mouseProc, GetModuleHandle(null), 0);
+                if (hookId == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+
+                // Windows delivers WH_MOUSE_LL callbacks to the installing thread.
+                // Keep this message pump separate from rendering and fullscreen scans.
+                while (Volatile.Read(ref mouseHookStopRequested) == 0)
                 {
-                    IntPtr hMod = GetModuleHandle(curModule.ModuleName);
-                    IntPtr result = SetWindowsHookEx(WH_MOUSE_LL, proc, hMod, 0);
-                    return result;
+                    int result = GetMessage(out message, IntPtr.Zero, 0, 0);
+                    if (result == 0) break;
+                    if (result < 0) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
                 }
             }
             catch (Exception ex)
             {
-                Program.LogDebug(string.Format("SetHook Exception: {0}", ex.ToString()));
-                return IntPtr.Zero;
+                Interlocked.Exchange(ref mouseHookError, ex);
             }
+            finally
+            {
+                IntPtr installedHook = Interlocked.Exchange(ref hookId, IntPtr.Zero);
+                if (installedHook != IntPtr.Zero) UnhookWindowsHookEx(installedHook);
+                Volatile.Write(ref mouseHookThreadId, 0);
+            }
+        }
+
+        private static void StopMouseHook()
+        {
+            Volatile.Write(ref mouseRouting, null);
+            Volatile.Write(ref mouseHookStopRequested, 1);
+            int threadId = Volatile.Read(ref mouseHookThreadId);
+            if (threadId != 0) PostThreadMessage(unchecked((uint)threadId), 0x0012 /* WM_QUIT */, IntPtr.Zero, IntPtr.Zero);
         }
 
         private static IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
+            // Motion, wheel and other buttons pass through without allocations or UI work.
+            if (nCode < 0 || (wParam != (IntPtr)WM_LBUTTONDOWN && wParam != (IntPtr)WM_LBUTTONUP))
+                return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+
             try
             {
-                if (nCode >= 0 && (wParam == (IntPtr)WM_LBUTTONDOWN || wParam == (IntPtr)WM_LBUTTONUP))
+                MouseRoutingSnapshot routing = Volatile.Read(ref mouseRouting);
+                if (routing != null)
                 {
                     MSLLHOOKSTRUCT hookStruct = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
-
-                    if (activeInstance != null && !remotePanelBounds.IsEmpty)
+                    if (routing.ScreenBounds.Contains(hookStruct.pt.x, hookStruct.pt.y) &&
+                        IsWindow(routing.RenderWindow) &&
+                        ShouldForwardDesktopClick(hookStruct.pt, routing) &&
+                        ForwardMouseClick(routing.RenderWindow, hookStruct.pt.x, hookStruct.pt.y, (uint)wParam.ToInt32()))
                     {
-                        System.Drawing.Point screenPt = new System.Drawing.Point(hookStruct.pt.x, hookStruct.pt.y);
-                        System.Drawing.Point clientPt = activeInstance.PointToClient(screenPt);
-
-                        if (remotePanelBounds.Contains(clientPt))
-                        {
-                            if (renderWindow == IntPtr.Zero || !IsWindow(renderWindow))
-                            {
-                                activeInstance.FindRenderWindow();
-                            }
-
-                            if (!activeInstance.ShouldForwardDesktopClick(screenPt))
-                            {
-                                return CallNextHookEx(hookId, nCode, wParam, lParam);
-                            }
-
-                            if (renderWindow == IntPtr.Zero)
-                            {
-                                activeInstance.FindRenderWindow();
-                            }
-
-                            if (renderWindow != IntPtr.Zero)
-                            {
-                                uint msg = (uint)wParam.ToInt32();
-                                ForwardMouseClick(renderWindow, hookStruct.pt.x, hookStruct.pt.y, msg);
-                                return (IntPtr)1; // Swallow click to prevent desktop listview selection box/focus loss
-                            }
-                        }
+                        return (IntPtr)1; // Suppress desktop selection only after successful forwarding.
                     }
                 }
             }
             catch (Exception ex)
             {
-                Program.LogDebug(string.Format("HookCallback Exception: {0}", ex.ToString()));
+                // File I/O here would stall mouse input for the whole desktop.
+                Interlocked.Exchange(ref mouseHookError, ex);
             }
-            return CallNextHookEx(hookId, nCode, wParam, lParam);
+            return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
         }
 
-        private bool ShouldForwardDesktopClick(System.Drawing.Point screenPt)
+        private static bool ShouldForwardDesktopClick(POINT screenPt, MouseRoutingSnapshot routing)
         {
-            IntPtr hit = WindowFromPoint(new POINT { x = screenPt.X, y = screenPt.Y });
+            IntPtr hit = WindowFromPoint(screenPt);
             if (hit == IntPtr.Zero) return false;
-            if (hit == this.Handle || hit == renderWindow) return true;
+            if (hit == routing.HostWindow || hit == routing.RenderWindow) return true;
 
             IntPtr current = hit;
             for (int i = 0; i < 8 && current != IntPtr.Zero; i++)
             {
-                if (current == this.Handle || current == renderWindow) return true;
+                if (current == routing.HostWindow || current == routing.RenderWindow) return true;
 
                 string cls = GetWindowClassName(current);
                 if (cls == "Progman" || cls == "WorkerW" || cls == "SHELLDLL_DefView" || cls == "SysListView32")
@@ -1603,7 +1662,7 @@ namespace DesktopHtmlHost
 
                 uint pid;
                 GetWindowThreadProcessId(current, out pid);
-                if (pid == (uint)Process.GetCurrentProcess().Id)
+                if (pid == currentProcessId)
                 {
                     return true;
                 }
@@ -1626,9 +1685,23 @@ namespace DesktopHtmlHost
         {
             try
             {
+                renderWindow = IntPtr.Zero;
                 EnumChildWindows(this.Handle, FindRenderWindowCallback, IntPtr.Zero);
             }
             catch { }
+            PublishMouseRouting();
+        }
+
+        private void PublishMouseRouting()
+        {
+            if (isClosing || !IsHandleCreated || renderWindow == IntPtr.Zero || remotePanelBounds.IsEmpty)
+            {
+                Volatile.Write(ref mouseRouting, null);
+                return;
+            }
+            System.Drawing.Point origin = PointToScreen(remotePanelBounds.Location);
+            Volatile.Write(ref mouseRouting, new MouseRoutingSnapshot(
+                new System.Drawing.Rectangle(origin, remotePanelBounds.Size), Handle, renderWindow));
         }
 
         private static bool FindRenderWindowCallback(IntPtr hwnd, IntPtr lParam)
@@ -1643,13 +1716,13 @@ namespace DesktopHtmlHost
             return true;
         }
 
-        private static void ForwardMouseClick(IntPtr renderWin, int x, int y, uint msg)
+        private static bool ForwardMouseClick(IntPtr renderWin, int x, int y, uint msg)
         {
             POINT pt = new POINT { x = x, y = y };
-            ScreenToClient(renderWin, ref pt);
+            if (!ScreenToClient(renderWin, ref pt)) return false;
             IntPtr lParam = (IntPtr)((pt.y << 16) | (pt.x & 0xFFFF));
             IntPtr wParam = (IntPtr)(msg == WM_LBUTTONDOWN ? 1 : 0);
-            PostMessage(renderWin, msg, wParam, lParam);
+            return PostMessage(renderWin, msg, wParam, lParam);
         }
 
         private double GetDpiScale()
